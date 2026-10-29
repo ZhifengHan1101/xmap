@@ -50,6 +50,10 @@ typedef void (*probe_classify_packet_cb)(const u_char *packet_buf, uint32_t len,
 typedef int (*probe_close_cb)(struct state_conf *, struct state_send *,
                               struct state_recv *);
 
+// Optional: add module-specific entries to the --metadata-file JSON.
+// `json_obj` is the root `json_object *`.
+typedef void (*probe_metadata_cb)(void *json_obj);
+
 typedef struct probe_module {
     int         ipv46_flag;
     const char *name;
@@ -73,6 +77,12 @@ typedef struct probe_module {
     int                      numfields;
     const char              *helptext;
 
+    // Optional, default 0/NULL. Appended last so that existing modules are
+    // unaffected.
+    // Ask the receiver to open the capture with nanosecond timestamps when
+    // libpcap/kernel support it (see recv_pcap_tstamp_nano).
+    int               pcap_tstamp_nano;
+    probe_metadata_cb metadata;
 } probe_module_t;
 
 probe_module_t *get_probe_module_by_name(const char *name, int ipv46_flag);

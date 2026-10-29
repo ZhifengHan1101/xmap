@@ -34,6 +34,8 @@
 
 static pcap_t *pc = NULL;
 
+int recv_pcap_tstamp_nano = 0;
+
 void packet_cb(u_char __attribute__((__unused__)) * user,
                const struct pcap_pkthdr *p, const u_char *bytes) {
     struct timespec ts;
@@ -51,7 +53,8 @@ void packet_cb(u_char __attribute__((__unused__)) * user,
     // length of entire packet captured by libpcap
     uint32_t buflen = (uint32_t) p->caplen;
     ts.tv_sec       = p->ts.tv_sec;
-    ts.tv_nsec      = p->ts.tv_usec * 1000;
+    // with PCAP_TSTAMP_PRECISION_NANO, ts.tv_usec holds nanoseconds
+    ts.tv_nsec = recv_pcap_tstamp_nano ? p->ts.tv_usec : p->ts.tv_usec * 1000;
     handle_packet(buflen, bytes, ts);
 }
 
@@ -61,10 +64,43 @@ void recv_init() {
     char bpftmp[BPFLEN];
     char errbuf[PCAP_ERRBUF_SIZE];
 
-    pc = pcap_open_live(xconf.iface, xconf.probe_module->pcap_snaplen,
-                        PCAP_PROMISC, PCAP_TIMEOUT, errbuf);
-    if (pc == NULL) {
-        log_fatal("recv", "could not open device %s: %s", xconf.iface, errbuf);
+    if (xconf.probe_module->pcap_tstamp_nano) {
+        // Same parameters as pcap_open_live, but the timestamp precision has to
+        // be chosen between pcap_create and pcap_activate.
+        pc = pcap_create(xconf.iface, errbuf);
+        if (pc == NULL) {
+            log_fatal("recv", "could not open device %s: %s", xconf.iface,
+                      errbuf);
+        }
+        if (pcap_set_snaplen(pc, xconf.probe_module->pcap_snaplen) ||
+            pcap_set_promisc(pc, PCAP_PROMISC) ||
+            pcap_set_timeout(pc, PCAP_TIMEOUT)) {
+            log_fatal("recv", "could not configure device %s", xconf.iface);
+        }
+        if (pcap_set_tstamp_precision(pc, PCAP_TSTAMP_PRECISION_NANO) == 0) {
+            recv_pcap_tstamp_nano = 1;
+        } else {
+            log_warn("recv",
+                     "nanosecond pcap timestamps not supported, using "
+                     "microseconds");
+        }
+        if (pcap_activate(pc) < 0) {
+            log_fatal("recv", "could not open device %s: %s", xconf.iface,
+                      pcap_geterr(pc));
+        }
+        if (recv_pcap_tstamp_nano &&
+            pcap_get_tstamp_precision(pc) != PCAP_TSTAMP_PRECISION_NANO) {
+            recv_pcap_tstamp_nano = 0;
+        }
+        log_debug("recv", "pcap timestamp precision: %s",
+                  recv_pcap_tstamp_nano ? "nano" : "micro");
+    } else {
+        pc = pcap_open_live(xconf.iface, xconf.probe_module->pcap_snaplen,
+                            PCAP_PROMISC, PCAP_TIMEOUT, errbuf);
+        if (pc == NULL) {
+            log_fatal("recv", "could not open device %s: %s", xconf.iface,
+                      errbuf);
+        }
     }
     switch (pcap_datalink(pc)) {
     case DLT_EN10MB:

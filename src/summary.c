@@ -249,6 +249,9 @@ void json_metadata(FILE *file) {
     json_object_object_add(
         obj, "probe_module",
         json_object_new_string(((probe_module_t *) xconf.probe_module)->name));
+    if (((probe_module_t *) xconf.probe_module)->metadata) {
+        ((probe_module_t *) xconf.probe_module)->metadata(obj);
+    }
     json_object_object_add(
         obj, "output_module",
         json_object_new_string(

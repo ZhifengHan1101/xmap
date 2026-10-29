@@ -44,6 +44,8 @@ void recv_cleanup() {
     pfring_zc_sync_queue(pf_recv, rx_only);
 }
 
+int recv_pcap_tstamp_nano = 0;
+
 void recv_packets() {
     int ret;
 
