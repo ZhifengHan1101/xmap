@@ -23,6 +23,7 @@
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <pcap/pcap.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -121,28 +122,51 @@ int get_iface_hw_addr(const char *iface_, unsigned char *hw_mac) {
     return EXIT_SUCCESS;
 }
 
+// Read a netlink reply into buf; returns the length of the data messages
+// (NLMSG_DONE excluded) or -1.
+// One recv can carry several messages, and the kernel may append NLMSG_DONE
+// to the last batch of a dump, so every message is examined: looking only at
+// the first one misses the end of the dump and blocks in recv forever.
 int read_nl_sock(int sock, char *buf, int buf_len) {
     int   msg_len = 0;
     char *pbuf    = buf;
     do {
+        if (buf_len - msg_len <= 0) {
+            log_error("get_gateway-linux", "netlink reply exceeds %d bytes",
+                      buf_len);
+            return -1;
+        }
         int len = recv(sock, pbuf, buf_len - msg_len, 0);
         if (len <= 0) {
             log_error("get_gateway-linux", "recv failed: %s", strerror(errno));
             return -1;
         }
         struct nlmsghdr *nlhdr = (struct nlmsghdr *) pbuf;
-        if (NLMSG_OK(nlhdr, ((unsigned int) len)) == 0 ||
-            nlhdr->nlmsg_type == NLMSG_ERROR) {
-            log_error("get_gateway-linux", "recv failed: %s", strerror(errno));
+        unsigned int     rem   = (unsigned int) len;
+        int              done  = 0;
+        if (NLMSG_OK(nlhdr, rem) == 0) {
+            log_error("get_gateway-linux", "truncated netlink message");
             return -1;
         }
-        if (nlhdr->nlmsg_type == NLMSG_DONE) {
-            break;
-        } else {
-            msg_len += len;
-            pbuf += len;
+        for (; NLMSG_OK(nlhdr, rem); nlhdr = NLMSG_NEXT(nlhdr, rem)) {
+            if (nlhdr->nlmsg_type == NLMSG_ERROR) {
+                log_error("get_gateway-linux", "netlink error reply");
+                return -1;
+            }
+            if (nlhdr->nlmsg_type == NLMSG_DONE) {
+                done = 1;
+                break;
+            }
+            if ((nlhdr->nlmsg_flags & NLM_F_MULTI) == 0) {
+                nlhdr = NLMSG_NEXT(nlhdr, rem);
+                done  = 1;
+                break;
+            }
         }
-        if ((nlhdr->nlmsg_flags & NLM_F_MULTI) == 0) {
+        int used = (int) ((char *) nlhdr - pbuf);
+        msg_len += used;
+        pbuf += used;
+        if (done) {
             break;
         }
     } while (1);
@@ -155,6 +179,15 @@ int send_nl_req(uint16_t msg_type, uint32_t seq, void *payload,
     if (sock < 0) {
         log_error("get_gateway-linux", "unable to get socket: %s",
                   strerror(errno));
+        return -1;
+    }
+    // never block startup on a reply that does not come
+    struct timeval timeout = {.tv_sec = 2, .tv_usec = 0};
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) <
+        0) {
+        log_error("get_gateway-linux", "unable to set socket timeout: %s",
+                  strerror(errno));
+        close(sock);
         return -1;
     }
     if (NLMSG_SPACE(payload_len) < payload_len) {
@@ -175,6 +208,8 @@ int send_nl_req(uint16_t msg_type, uint32_t seq, void *payload,
 
     if (send(sock, nlmsg, nlmsg->nlmsg_len, 0) < 0) {
         log_error("get_gateway-linux", "failure sending: %s", strerror(errno));
+        free(nlmsg);
+        close(sock);
         return -1;
     }
     free(nlmsg);
@@ -185,7 +220,6 @@ int send_nl_req(uint16_t msg_type, uint32_t seq, void *payload,
 static int _get_default_gw(uint8_t *gw_ip, char *iface) {
     struct rtmsg     req;
     unsigned int     nl_len;
-    char             buf[8192];
     struct nlmsghdr *nlhdr;
 
     if (!gw_ip || !iface) {
@@ -195,12 +229,19 @@ static int _get_default_gw(uint8_t *gw_ip, char *iface) {
     // Send RTM_GETROUTE request
     memset(&req, 0, sizeof(req));
     int sock = send_nl_req(RTM_GETROUTE, 0, &req, sizeof(req));
-
-    // Read responses
-    nl_len = read_nl_sock(sock, buf, sizeof(buf));
-    if (nl_len <= 0) {
+    if (sock < 0) {
         return -1;
     }
+
+    // Read responses (the dump covers every table, so it can be large)
+    char *buf = xmalloc(GW_BUFFER_SIZE);
+    int   len = read_nl_sock(sock, buf, GW_BUFFER_SIZE);
+    close(sock);
+    if (len <= 0) {
+        free(buf);
+        return -1;
+    }
+    nl_len = (unsigned int) len;
 
     // Parse responses
     nlhdr = (struct nlmsghdr *) buf;
@@ -239,10 +280,12 @@ static int _get_default_gw(uint8_t *gw_ip, char *iface) {
         }
 
         if (has_gw) {
+            free(buf);
             return 0;
         }
         nlhdr = NLMSG_NEXT(nlhdr, nl_len);
     }
+    free(buf);
     return -1;
 }
 
@@ -261,14 +304,41 @@ int get_default_gw_ip(uint8_t *gw_ip, const char *iface) {
     return EXIT_SUCCESS;
 }
 
-int get_hw_addr(const uint8_t *gw_ip, const char *iface,
-                unsigned char *hw_mac) {
+// Fallback for get_hw_addr: the gateway's entry in /proc/net/arp.
+static int get_hw_addr_proc_arp(const uint8_t *gw_ip, const char *iface,
+                                unsigned char *hw_mac) {
+    char gw_ip_str[INET_ADDRSTRLEN];
+    if (inet_ntop(AF_INET, gw_ip, gw_ip_str, sizeof(gw_ip_str)) == NULL) {
+        return EXIT_FAILURE;
+    }
+    FILE *arp = fopen("/proc/net/arp", "r");
+    if (arp == NULL) {
+        return EXIT_FAILURE;
+    }
+    char line[256];
+    if (fgets(line, sizeof(line), arp) != NULL) { // header
+        while (fgets(line, sizeof(line), arp) != NULL) {
+            char ip[INET_ADDRSTRLEN], hw_type[16], flags[16], mac[18],
+                mask[16], device[IF_NAMESIZE];
+            if (sscanf(line, "%15s %15s %15s %17s %15s %15s", ip, hw_type,
+                       flags, mac, mask, device) == 6 &&
+                strcmp(ip, gw_ip_str) == 0 && strcmp(device, iface) == 0 &&
+                strcmp(mac, "00:00:00:00:00:00") != 0 &&
+                parse_mac(hw_mac, mac)) {
+                fclose(arp);
+                return EXIT_SUCCESS;
+            }
+        }
+    }
+    fclose(arp);
+    return EXIT_FAILURE;
+}
+
+static int get_hw_addr_netlink(const uint8_t *gw_ip, const char *iface,
+                               unsigned char *hw_mac) {
     struct ndmsg req;
     memset(&req, 0, sizeof(struct ndmsg));
 
-    if (!gw_ip || !hw_mac) {
-        return EXIT_FAILURE;
-    }
     // Send RTM_GETNEIGH request
     req.ndm_family  = AF_INET;
     req.ndm_ifindex = if_nametoindex(iface);
@@ -276,9 +346,13 @@ int get_hw_addr(const uint8_t *gw_ip, const char *iface,
     req.ndm_type    = NDA_LLADDR;
 
     int sock = send_nl_req(RTM_GETNEIGH, 1, &req, sizeof(req));
+    if (sock < 0) {
+        return EXIT_FAILURE;
+    }
     // Read responses
     char *buf    = xmalloc(GW_BUFFER_SIZE);
     int   nl_len = read_nl_sock(sock, buf, GW_BUFFER_SIZE);
+    close(sock);
     if (nl_len <= 0) {
         free(buf);
         return EXIT_FAILURE;
@@ -292,6 +366,7 @@ int get_hw_addr(const uint8_t *gw_ip, const char *iface,
         unsigned char  mac[6];
         struct in_addr dst_ip;
         int            correct_ip = 0;
+        int            have_mac   = 0;
 
         rt_msg = (struct rtmsg *) NLMSG_DATA(nlhdr);
         if ((rt_msg->rtm_family != AF_INET)) {
@@ -312,9 +387,11 @@ int get_hw_addr(const uint8_t *gw_ip, const char *iface,
                               "provide an"
                               " interface via -i)",
                               RTA_PAYLOAD(rt_attr));
+                    free(buf);
                     return EXIT_FAILURE;
                 }
                 memcpy(mac, RTA_DATA(rt_attr), IFHWADDRLEN);
+                have_mac = 1;
                 break;
             case NDA_DST:
                 if (RTA_PAYLOAD(rt_attr) != sizeof(dst_ip)) {
@@ -325,6 +402,7 @@ int get_hw_addr(const uint8_t *gw_ip, const char *iface,
                         " If you are using a VPN, supply the --iplayer flag"
                         " (and provide an interface via -i)",
                         RTA_PAYLOAD(rt_attr));
+                    free(buf);
                     return EXIT_FAILURE;
                 }
                 memcpy(&dst_ip, RTA_DATA(rt_attr), sizeof(dst_ip));
@@ -335,7 +413,8 @@ int get_hw_addr(const uint8_t *gw_ip, const char *iface,
             }
             rt_attr = RTA_NEXT(rt_attr, rt_len);
         }
-        if (correct_ip) {
+        // an incomplete/failed entry for the gateway has no NDA_LLADDR
+        if (correct_ip && have_mac) {
             memcpy(hw_mac, mac, IFHWADDRLEN);
             free(buf);
             return EXIT_SUCCESS;
@@ -344,6 +423,19 @@ int get_hw_addr(const uint8_t *gw_ip, const char *iface,
     }
     free(buf);
     return EXIT_FAILURE;
+}
+
+int get_hw_addr(const uint8_t *gw_ip, const char *iface,
+                unsigned char *hw_mac) {
+    if (!gw_ip || !hw_mac) {
+        return EXIT_FAILURE;
+    }
+    if (get_hw_addr_netlink(gw_ip, iface, hw_mac) == EXIT_SUCCESS) {
+        return EXIT_SUCCESS;
+    }
+    log_debug("get_gateway-linux",
+              "gateway not found via netlink, trying /proc/net/arp");
+    return get_hw_addr_proc_arp(gw_ip, iface, hw_mac);
 }
 
 #endif // XMAP_GET_GATEWAY_LINUX_H
