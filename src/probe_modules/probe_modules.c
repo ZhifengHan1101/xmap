@@ -46,6 +46,7 @@ extern probe_module_t module_dnsafe;
 extern probe_module_t module_tcp_scan;
 extern probe_module_t module_tcp_syn;
 extern probe_module_t module_icmp6_echo;
+extern probe_module_t module_icmp6_echo_time;
 extern probe_module_t module_udp6;
 extern probe_module_t module_dns6x;
 extern probe_module_t module_dns6a;
@@ -112,6 +113,7 @@ probe_module_t *probe_modules[] = {
     &module_dns6afe,
     &module_tcp6_syn,
     &module_icmp6_echo,
+    &module_icmp6_echo_time,
     &module_icmp6_echo_gw,
     &module_icmp6_echo_tmxd,
     // ADD YOUR MODULE HERE
