@@ -23,6 +23,7 @@
 #include "../fieldset.h"
 
 extern probe_module_t module_icmp_echo;
+extern probe_module_t module_icmp_echo_time;
 extern probe_module_t module_udp;
 extern probe_module_t module_dns;
 extern probe_module_t module_dnsr;
@@ -95,6 +96,7 @@ probe_module_t *probe_modules[] = {
     &module_tcp_scan,
     &module_tcp_syn,
     &module_icmp_echo,
+    &module_icmp_echo_time,
     &module_udp6,
     &module_dns6x,
     &module_dns6a,
