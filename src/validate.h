@@ -22,4 +22,9 @@ void validate_init();
 void validate_gen(const uint8_t *src_ip, const uint8_t *dst_ip,
                   port_h_t dst_port, uint8_t output[VALIDATE_BYTES]);
 
+// One raw AES-128 block under the scan's validation key. For modules that need
+// a keyed tag over more than the (src, dst, port) tuple.
+void validate_prf16(const uint8_t in[VALIDATE_BYTES],
+                    uint8_t       out[VALIDATE_BYTES]);
+
 #endif // XMAP_VALIDATE_H

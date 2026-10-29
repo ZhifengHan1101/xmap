@@ -45,6 +45,7 @@ set(SOURCES_PROBE_MODULES
         probe_modules/packet_icmp6.c
         probe_modules/probe_modules.c
         probe_modules/module_icmp_echo.c
+        probe_modules/module_icmp_echo_time.c
         probe_modules/module_icmp6_echo.c
         probe_modules/module_icmp6_echo_gw.c
         probe_modules/module_icmp6_echo_tmxd.c
@@ -185,6 +186,14 @@ else ()
     set(SOURCES ${SOURCES} recv-pcap.c)
     #    set(SOURCES_XTEST ${SOURCES_XTEST} recv-pcap.c)
 endif ()
+
+# fork commit recorded in the icmp_echo_time metadata (configure time)
+execute_process(COMMAND git -C "${CMAKE_SOURCE_DIR}" describe --always --dirty
+        OUTPUT_VARIABLE XMAP_RTT_GIT_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(XMAP_RTT_GIT_COMMIT)
+    set_source_files_properties(probe_modules/module_icmp_echo_time.c PROPERTIES
+            COMPILE_DEFINITIONS XMAP_RTT_GIT_COMMIT="${XMAP_RTT_GIT_COMMIT}")
+endif()
 
 # Set configure time xmap version
 configure_file(xopt.ggo.in ${CMAKE_BINARY_DIR}/src/xopt.ggo @ONLY)

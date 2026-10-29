@@ -58,3 +58,9 @@ void validate_gen(const uint8_t *src_ip, const uint8_t *dst_ip,
     aes_input[3] ^= (uint8_t) (dst_port & 0xffu);
     rijndaelEncrypt(aes_sched, AES_ROUNDS, (uint8_t *) aes_input, output);
 }
+
+void validate_prf16(const uint8_t in[VALIDATE_BYTES],
+                    uint8_t       out[VALIDATE_BYTES]) {
+    assert(inited);
+    rijndaelEncrypt(aes_sched, AES_ROUNDS, (uint8_t *) in, out);
+}
