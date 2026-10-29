@@ -35,6 +35,10 @@ if [ $V6 = 1 ]; then
   ip -n $SCAN addr add fd77::1/64 dev va nodad; ip -n $RESP addr add fd77::2/64 dev vb nodad
   ip -n $SCAN -6 route add fd88::/64 via fd77::2
   for i in $(seq 1 "$N"); do ip -n $RESP addr add "fd88::$(printf %x "$i")/128" dev lo nodad; done
+  # fd99:: is answered by responder.py only. Without a route the responder
+  # kernel answers every probe with ICMPv6 "no route" (forwarding off or not),
+  # which adds rows to the exact-count checks; a blackhole route drops silently.
+  ip -n $RESP -6 route add blackhole fd99::/64
 fi
 sleep 1
 echo "kernel_ipv6=$V6"

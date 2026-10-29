@@ -250,3 +250,22 @@ old archived rows have empty values there. In the all-RTT mode, deduplicate
 before archiving: key `(saddr, probe_idx)`, keep the smallest `recv_ts_ns`.
 
 Rollback: switch `-M`/binary/`-f` back; the production `xmap` was never changed.
+
+## 6. Follow-up after the tky pilot (2026-10-29)
+
+* **Gateway auto-detection hang (core, all modules).** `read_nl_sock` looked
+  only at the first netlink message of each `recv`; when the kernel appends
+  `NLMSG_DONE` to the last batch of a dump, the end was missed and xmap blocked
+  in `recv` forever (reproduced on tky, Linux 6.17: stuck >30 s without `-G`).
+  Every message is now examined; the netlink socket has a 2 s receive timeout;
+  callers check the socket and free/close it; a neighbour entry without a
+  link-layer address is no longer accepted; `/proc/net/arp` is a fallback when
+  netlink finds no entry (from the local patch deployed on tky). On tky the
+  fixed build found the gateway MAC in 168 ms without `-G`, equal to
+  `ip neigh`; same result here.
+* **netns harness.** With kernel IPv6 enabled, the responder namespace answered
+  `fd99::` probes with ICMPv6 "no route", adding rows to the exact-count checks;
+  `netns_up.sh` now installs a blackhole route for `fd99::/64`. The dup and
+  reorder checks allow up to 1% of RTTs outside the netem window (user-space
+  responder stalls) and the dup check also matches the deduplicated rows to the
+  capture. On tky: 76 PASS, 0 FAIL, `--xmap-old` = deployed binary.
